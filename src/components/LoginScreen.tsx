@@ -15,13 +15,16 @@ import {
   Briefcase,
   User
 } from 'lucide-react';
-import { pb, AREIAPRETA_URL, checkAreiaPretaHealth } from '../lib/areiapreta';
+import { pb, AREIAPRETA_URL, checkAreiaPretaHealth, sanitizeText } from '../lib/areiapreta';
 
 interface LoginScreenProps {
   onLoginSuccess: (user: any) => void;
 }
 
 type AuthMode = 'login' | 'forgot_password' | 'register_admin';
+
+// Validação de formato de e-mail segura contra ReDoS (Regular Expression Denial of Service)
+const EMAIL_REGEX = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
 
 export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [authMode, setAuthMode] = useState<AuthMode>('login');
@@ -44,15 +47,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
   const [resetEmail, setResetEmail] = useState('');
   const [resetSuccessMessage, setResetSuccessMessage] = useState('');
 
-  // Estados gerais
+  // Estados gerais e mitigação contra força bruta
   const [isLoading, setIsLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const [serverOnline, setServerOnline] = useState<boolean | null>(null);
+  const [failedAttempts, setFailedAttempts] = useState(0);
+  const [lockoutUntil, setLockoutUntil] = useState<number | null>(null);
 
-  // Carregamento automático do e-mail salvo anteriormente
+  // Carregamento automático do e-mail salvo anteriormente com sanitização
   useEffect(() => {
-    const savedEmail = localStorage.getItem('areiapreta_saved_email');
+    const savedEmail = sanitizeText(localStorage.getItem('areiapreta_saved_email') || '', 120);
     if (savedEmail) {
       setEmail(savedEmail);
       setResetEmail(savedEmail);
@@ -67,28 +72,53 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
 
   // Salvamento automático do e-mail digitado a cada alteração
   const handleEmailChange = (val: string) => {
-    setEmail(val);
-    setResetEmail(val);
-    if (val.trim()) {
-      localStorage.setItem('areiapreta_saved_email', val.trim());
+    const clean = sanitizeText(val, 120);
+    setEmail(clean);
+    setResetEmail(clean);
+    if (clean.trim()) {
+      try {
+        localStorage.setItem('areiapreta_saved_email', clean.trim());
+      } catch {}
     }
   };
 
-  // Submissão de Login
+  // Submissão de Login com defesa contra força bruta
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
+
+    // Defesa contra ataque de força bruta / dicionário
+    if (lockoutUntil && Date.now() < lockoutUntil) {
+      const waitSeconds = Math.ceil((lockoutUntil - Date.now()) / 1000);
+      setErrorMessage(`Múltiplas tentativas incorretas detectadas. Por segurança, aguarde ${waitSeconds} segundos para tentar novamente.`);
+      return;
+    }
+
+    const cleanEmail = sanitizeText(email, 120);
+    if (!EMAIL_REGEX.test(cleanEmail)) {
+      setErrorMessage('Por favor, informe um formato de e-mail corporativo válido.');
+      return;
+    }
+
     setIsLoading(true);
 
     try {
-      const authData = await pb.collection('users').authWithPassword(email, password);
+      const authData = await pb.collection('users').authWithPassword(cleanEmail, password);
+      setFailedAttempts(0);
       onLoginSuccess(authData.record);
     } catch (err: any) {
       console.warn('Erro na autenticação com AreiaPreta:', err);
-      if (err?.status === 0 || err?.message?.includes('Failed to fetch') || err?.message?.includes('NetworkError')) {
-        setErrorMessage(`Servidor AreiaPreta inacessível em ${AREIAPRETA_URL}. Verifique a conexão do servidor.`);
+      const nextAttempts = failedAttempts + 1;
+      setFailedAttempts(nextAttempts);
+
+      // Bloqueio temporário após 5 tentativas consecutivas
+      if (nextAttempts >= 5) {
+        setLockoutUntil(Date.now() + 30000); // 30 segundos de pausa defensiva
+        setErrorMessage('Limite de tentativas excedido. Bloqueio preventivo ativado por 30 segundos.');
+      } else if (err?.status === 0 || err?.message?.includes('Failed to fetch') || err?.message?.includes('NetworkError')) {
+        setErrorMessage(`Servidor AreiaPreta inacessível em ${AREIAPRETA_URL}. Verifique a conexão com o servidor.`);
       } else {
-        setErrorMessage(err?.data?.message || err?.message || 'E-mail ou senha incorretos.');
+        setErrorMessage('E-mail ou senha incorretos.');
       }
     } finally {
       setIsLoading(false);
@@ -100,25 +130,45 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     e.preventDefault();
     setErrorMessage('');
     setResetSuccessMessage('');
+
+    const cleanResetEmail = sanitizeText(resetEmail, 120);
+    if (!EMAIL_REGEX.test(cleanResetEmail)) {
+      setErrorMessage('Informe um e-mail com formato válido.');
+      return;
+    }
+
     setIsLoading(true);
 
     try {
-      await pb.collection('users').requestPasswordReset(resetEmail);
-      setResetSuccessMessage(`Instruções de redefinição enviadas com sucesso para o e-mail: ${resetEmail}`);
+      await pb.collection('users').requestPasswordReset(cleanResetEmail);
+      setResetSuccessMessage(`Instruções de redefinição de credenciais enviadas para: ${cleanResetEmail}`);
     } catch (err: any) {
       console.warn('Erro ao solicitar redefinição no AreiaPreta:', err);
-      // Se servidor offline, fornece confirmação segura informativa
-      setResetSuccessMessage(`Solicitação processada com sucesso. Verifique a caixa postal de ${resetEmail}.`);
+      setResetSuccessMessage(`Solicitação processada com sucesso. Verifique a caixa postal de ${cleanResetEmail}.`);
     } finally {
       setIsLoading(false);
     }
   };
 
-  // Submissão de Cadastro de Administração
+  // Submissão de Cadastro de Administração com higienização total
   const handleRegisterSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     setSuccessMessage('');
+
+    const cleanName = sanitizeText(registerName, 100);
+    const cleanEmail = sanitizeText(registerEmail, 120);
+    const cleanRole = sanitizeText(registerRole, 50);
+
+    if (!cleanName || !cleanEmail) {
+      setErrorMessage('Preencha os campos obrigatórios.');
+      return;
+    }
+
+    if (!EMAIL_REGEX.test(cleanEmail)) {
+      setErrorMessage('E-mail corporativo em formato inválido.');
+      return;
+    }
 
     if (registerPassword !== registerPasswordConfirm) {
       setErrorMessage('As senhas digitadas não coincidem.');
@@ -134,21 +184,20 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
 
     try {
       const newAdminData = {
-        name: registerName,
-        email: registerEmail,
-        role: registerRole,
+        name: cleanName,
+        email: cleanEmail,
+        role: cleanRole,
         password: registerPassword,
         passwordConfirm: registerPasswordConfirm,
         emailVisibility: true,
       };
 
       const createdRecord = await pb.collection('users').create(newAdminData);
-      setSuccessMessage('Administrador cadastrado com sucesso! Realizando autenticação automática...');
+      setSuccessMessage('Administrador credenciado com sucesso! Efetuando autenticação...');
       
-      // Realiza login automático em seguida
       setTimeout(async () => {
         try {
-          const authData = await pb.collection('users').authWithPassword(registerEmail, registerPassword);
+          const authData = await pb.collection('users').authWithPassword(cleanEmail, registerPassword);
           onLoginSuccess(authData.record);
         } catch {
           onLoginSuccess(createdRecord);
@@ -158,12 +207,11 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
     } catch (err: any) {
       console.warn('Erro no cadastro com AreiaPreta:', err);
       if (err?.status === 0 || err?.message?.includes('Failed to fetch')) {
-        // Modo de demonstração caso o servidor local esteja desconectado
         const mockAdmin = {
           id: `usr_${Date.now().toString(36)}`,
-          email: registerEmail,
-          name: registerName,
-          role: registerRole,
+          email: cleanEmail,
+          name: cleanName,
+          role: cleanRole,
           created: new Date().toISOString(),
         };
         setSuccessMessage('Cadastro administrativo concluído em modo de demonstração local.');
@@ -171,7 +219,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
           onLoginSuccess(mockAdmin);
         }, 1200);
       } else {
-        setErrorMessage(err?.data?.message || err?.message || 'Erro ao realizar cadastro administrativo.');
+        setErrorMessage(sanitizeText(err?.data?.message || err?.message || 'Erro ao realizar cadastro administrativo.', 150));
       }
     } finally {
       setIsLoading(false);
@@ -309,6 +357,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                     id="login-email"
                     type="email"
                     required
+                    maxLength={120}
+                    autoComplete="username email"
                     value={email}
                     onChange={e => handleEmailChange(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 transition shadow-inner"
@@ -336,6 +386,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                     id="login-password"
                     type={showPassword ? 'text' : 'password'}
                     required
+                    maxLength={100}
+                    autoComplete="current-password"
                     value={password}
                     onChange={e => setPassword(e.target.value)}
                     className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-11 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 transition shadow-inner"
@@ -413,6 +465,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                         id="reset-email"
                         type="email"
                         required
+                        maxLength={120}
+                        autoComplete="email"
                         value={resetEmail}
                         onChange={e => handleEmailChange(e.target.value)}
                         className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 transition shadow-inner"
@@ -475,6 +529,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                       id="reg-name"
                       type="text"
                       required
+                      maxLength={100}
+                      autoComplete="name"
                       value={registerName}
                       onChange={e => setRegisterName(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 transition shadow-inner"
@@ -493,6 +549,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                       id="reg-email"
                       type="email"
                       required
+                      maxLength={120}
+                      autoComplete="email"
                       value={registerEmail}
                       onChange={e => {
                         setRegisterEmail(e.target.value);
@@ -513,7 +571,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                     <select
                       id="reg-role"
                       value={registerRole}
-                      onChange={e => setRegisterRole(e.target.value)}
+                      onChange={e => setRegisterRole(sanitizeText(e.target.value, 50))}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-4 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 transition shadow-inner cursor-pointer"
                     >
                       <option value="Administrador Geral">Administrador Geral</option>
@@ -537,6 +595,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                       type={showRegisterPassword ? 'text' : 'password'}
                       required
                       minLength={8}
+                      maxLength={100}
+                      autoComplete="new-password"
                       value={registerPassword}
                       onChange={e => setRegisterPassword(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-11 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 transition shadow-inner"
@@ -570,6 +630,8 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess }) => {
                       type={showRegisterPasswordConfirm ? 'text' : 'password'}
                       required
                       minLength={8}
+                      maxLength={100}
+                      autoComplete="new-password"
                       value={registerPasswordConfirm}
                       onChange={e => setRegisterPasswordConfirm(e.target.value)}
                       className="w-full bg-slate-950 border border-slate-800 rounded-xl pl-10 pr-11 py-2.5 text-sm text-slate-200 focus:outline-none focus:border-cyan-500 transition shadow-inner"

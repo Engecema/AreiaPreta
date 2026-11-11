@@ -19,7 +19,7 @@ import {
   ChevronRight,
   ExternalLink
 } from 'lucide-react';
-import { AREIAPRETA_URL, pb, checkAreiaPretaHealth } from '../lib/areiapreta';
+import { AREIAPRETA_URL, pb, checkAreiaPretaHealth, sanitizeText } from '../lib/areiapreta';
 import { DatabaseStatus, CollectionItem, AdminTab } from '../types';
 
 interface AdminPanelProps {
@@ -100,14 +100,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
 
   const handleCreateRecord = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTitle.trim()) return;
+    const cleanTitle = sanitizeText(newTitle, 140);
+    const cleanCategory = sanitizeText(newCategory, 40);
+    if (!cleanTitle.trim()) return;
 
     const newRec: CollectionItem = {
       id: `rec_${Date.now().toString(36)}`,
-      title: newTitle.trim(),
-      category: newCategory,
+      title: cleanTitle.trim(),
+      category: cleanCategory || 'Geral',
       status: 'Ativo',
-      author: currentUser?.email?.split('@')[0] || 'Admin',
+      author: sanitizeText(currentUser?.email?.split('@')[0] || 'Admin', 40),
       updatedAt: 'Agora',
     };
 
@@ -117,14 +119,16 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
   };
 
   const handleDeleteRecord = (id: string) => {
+    const cleanId = sanitizeText(id, 40);
     if (window.confirm('Confirma a exclusão deste registro no AreiaPreta?')) {
-      setRecords(records.filter(r => r.id !== id));
+      setRecords(records.filter(r => r.id !== cleanId));
     }
   };
 
+  const safeFilter = sanitizeText(searchFilter, 60).toLowerCase();
   const filteredRecords = records.filter(r => 
-    r.title.toLowerCase().includes(searchFilter.toLowerCase()) ||
-    r.category.toLowerCase().includes(searchFilter.toLowerCase())
+    r.title.toLowerCase().includes(safeFilter) ||
+    r.category.toLowerCase().includes(safeFilter)
   );
 
   return (
@@ -419,8 +423,9 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({ currentUser, onLogout })
                 <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                 <input
                   type="text"
+                  maxLength={60}
                   value={searchFilter}
-                  onChange={e => setSearchFilter(e.target.value)}
+                  onChange={e => setSearchFilter(sanitizeText(e.target.value, 60))}
                   className="w-full bg-slate-900 border border-slate-800 rounded-xl pl-10 pr-4 py-2 text-xs text-slate-200 focus:outline-none focus:border-cyan-500 transition"
                   aria-label="Buscar registros"
                 />
