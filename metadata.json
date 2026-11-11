@@ -1,0 +1,8 @@
+{
+  "name": "Engecema Areia Preta",
+  "description": "Painel Corporativo e Gestão de Dados AreiaPreta.",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
